@@ -19,7 +19,7 @@ Alternativamente, com a [CLI do Supabase](https://supabase.com/docs/guides/local
 - **`expenses`** — registro definitivo da despesa. `category_id` existe mas ainda **sem FK** (a constraint será adicionada quando a tabela `categories` for criada).
 - **`expense_items`** — itens do recibo, com `on delete cascade` a partir de `expenses`.
 - **`pending_expenses`** — entrada bruta (texto ou imagem) aguardando resolução; `status` inicia como `'pending'`.
-- **Bucket `receipts`** (Storage) — privado, limite de 10 MB por arquivo, aceita jpeg/png/webp/heic.
+- **Bucket `receipts`** (Storage) — privado, limite de 10 MB por arquivo, aceita jpeg/png/webp/heic e PDF.
 
 ## Acesso e RLS
 
