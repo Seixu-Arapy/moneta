@@ -215,6 +215,60 @@ def process_pending(pending: dict) -> None:
 | **Edge Function + Database Webhook** | Insert em `pending_expenses` dispara webhook → Edge Function chama o Claude e resolve na hora | Quando o app existir e você quiser processamento imediato, tudo dentro do Supabase |
 | **Automação (n8n / bot Telegram)** | Você manda a foto num chat, o bot faz a ingestão; o processamento roda como acima | Se quiser registrar recibos pelo celular antes do app ficar pronto |
 
+---
+
+## 3. Fluxo completo via Telegram
+
+Decisões tomadas:
+
+- A mensagem com a foto é **apagada do Telegram somente após confirmação** de que o arquivo foi salvo no bucket e a linha criada em `pending_expenses`. Se algo falhar, a mensagem permanece no chat e o bot responde com erro.
+- **Onde a compactação acontece**: dentro da Edge Function de ingestão, **em memória**, entre o download da foto do Telegram e o upload no bucket. O arquivo original nunca é gravado em lugar nenhum — o bucket só recebe a versão compactada. Observações:
+  - Edge Functions rodam **Deno**, então `sharp`/`Pillow` não se aplicam ali; usa-se uma biblioteca WASM (ex.: `ImageScript` ou `@jsquash/webp`).
+  - Fotos enviadas como "foto" no Telegram já chegam recomprimidas pelo próprio Telegram (JPEG, lado maior ≤ ~2560px); a função compacta mesmo assim para normalizar em WebP e cobrir o caso de envio como **documento** (que preserva o original) ou PDF (que passa direto, sem recompressão).
+
+```mermaid
+flowchart TD
+    subgraph TG["📱 Telegram"]
+        A["Você envia a foto do recibo<br/>(legenda opcional vira raw_input)"] --> B["Servidores do Telegram"]
+    end
+
+    B -->|"POST webhook<br/>+ secret token"| C
+
+    subgraph EF["⚡ Edge Function — ingestão"]
+        C{"Secret token e<br/>chat_id válidos?"} -->|"não"| X["Ignora silenciosamente"]
+        C -->|"sim"| D["Baixa a foto (getFile)"]
+        D --> E["🗜️ Compacta em memória<br/>redimensiona + WebP q80<br/>(PDF passa direto)"]
+        E --> F["Upload no bucket"]
+        F --> G["Insert em pending_expenses<br/>status = 'pending'"]
+        G --> H{"Upload e insert<br/>confirmados?"}
+        H -->|"sim"| I["Apaga a mensagem<br/>no Telegram"]
+        I --> J["Responde no chat:<br/>Recibo registrado ✅"]
+        H -->|"não"| K["Responde erro e<br/>mantém a mensagem"]
+    end
+
+    subgraph SB["🗄️ Supabase"]
+        L[("Bucket receipts<br/>privado")]
+        M[("pending_expenses")]
+        N[("expenses +<br/>expense_items")]
+    end
+
+    F --> L
+    G --> M
+
+    subgraph PR["🤖 Processamento — cron ou worker"]
+        O["Busca status = 'pending'"] --> P["Signed URL →<br/>baixa a imagem"]
+        P --> Q["Claude extrai os dados<br/>(structured outputs)"]
+        Q -->|"parse ok"| R["RPC resolve_pending_expense<br/>(transação atômica)"]
+        Q -->|"falha no parse"| S["status = 'error'<br/>reprocessa ou revisão manual"]
+    end
+
+    M --> O
+    L --> P
+    R --> N
+    R -->|"status = 'done' +<br/>resolved_expense_id"| M
+    S --> M
+```
+
 Notas de implementação:
 
 - **Duplicatas**: antes de resolver, o processador pode consultar `expenses` recentes (mesmo valor ± data próxima) e, em caso de suspeita, preencher `possible_duplicate_of` e deixar `status = 'needs_review'` em vez de resolver automaticamente.
