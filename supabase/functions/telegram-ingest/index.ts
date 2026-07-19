@@ -26,6 +26,9 @@ const supabase = createClient(
 
 const TG_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
 const BUCKET = "receipts";
+// used by the /processar command to trigger the worker on demand
+const WORKER_URL = `${Deno.env.get("SUPABASE_URL")}/functions/v1/process-receipts`;
+const WORKER_SECRET = Deno.env.get("WORKER_SECRET") ?? "";
 const MAX_DIMENSION = 2000;
 const JPEG_QUALITY = 80;
 
@@ -92,6 +95,88 @@ interface TelegramCallbackQuery {
   id: string;
   data?: string;
   message?: { message_id: number; chat: { id: number } };
+}
+
+async function countByStatus(status: string): Promise<number> {
+  const { count } = await supabase
+    .from("pending_expenses")
+    .select("id", { count: "exact", head: true })
+    .eq("status", status);
+  return count ?? 0;
+}
+
+async function sendQueueStatus(chatId: number) {
+  const [pending, waiting, errors] = await Promise.all([
+    countByStatus("pending"),
+    countByStatus("waiting_user"),
+    countByStatus("error"),
+  ]);
+
+  if (pending + waiting + errors === 0) {
+    await tg("sendMessage", {
+      chat_id: chatId,
+      text: "✨ Nenhuma pendência — tudo processado.",
+    });
+    return;
+  }
+
+  const lines = ["📋 Situação da fila:"];
+  if (pending > 0) lines.push(`• ${pending} aguardando processamento`);
+  if (waiting > 0) lines.push(`• ${waiting} esperando resposta sua`);
+  if (errors > 0) lines.push(`• ${errors} com erro (revisão manual)`);
+  if (pending > 0) lines.push("\nEnvie /processar para rodar agora sem esperar o cron.");
+  await tg("sendMessage", { chat_id: chatId, text: lines.join("\n") });
+}
+
+async function triggerWorker(chatId: number) {
+  if (!WORKER_SECRET) {
+    await tg("sendMessage", {
+      chat_id: chatId,
+      text: "⚠️ Worker não configurado (secret WORKER_SECRET ausente).",
+    });
+    return;
+  }
+  await tg("sendMessage", { chat_id: chatId, text: "⚙️ Processando a fila..." });
+
+  const res = await fetch(WORKER_URL, {
+    method: "POST",
+    headers: { "x-worker-secret": WORKER_SECRET },
+  });
+  const body = await res.json().catch(() => ({}));
+
+  let text: string;
+  if (body.skipped) {
+    text = "🛑 Orçamento diário de processamento atingido — a fila continua amanhã.";
+  } else {
+    const parts = [
+      `${body.resolved ?? 0} registrado(s)`,
+      `${body.asked ?? 0} pergunta(s) enviada(s)`,
+      `${body.errors ?? 0} erro(s)`,
+    ];
+    text = `✅ Rodada concluída: ${parts.join(", ")}.`;
+    if (body.rateLimited) {
+      text += "\n⏳ Limite do free tier atingido — o restante fica para o próximo ciclo.";
+    }
+  }
+  await tg("sendMessage", { chat_id: chatId, text: text });
+}
+
+// Chat commands are intercepted before ingestion — otherwise the text would
+// itself become a pending expense. Returns false when the message is not a
+// command.
+async function handleCommand(msg: TelegramMessage): Promise<boolean> {
+  if (!msg.text) return false;
+  const text = msg.text.trim().toLowerCase().replace(/[?!.]+$/, "");
+
+  if (["/pendencias", "/status", "alguma pendência", "alguma pendencia", "pendências", "pendencias"].includes(text)) {
+    await sendQueueStatus(msg.chat.id);
+    return true;
+  }
+  if (["/processar", "processar agora"].includes(text)) {
+    await triggerWorker(msg.chat.id);
+    return true;
+  }
+  return false;
 }
 
 // A reply to one of the worker's questions re-queues the paused row with the
@@ -189,6 +274,7 @@ async function handleCallback(cq: TelegramCallbackQuery) {
 
 async function handleMessage(msg: TelegramMessage) {
   if (await handleQuestionReply(msg)) return;
+  if (await handleCommand(msg)) return;
 
   const rawInput = msg.caption ?? msg.text ?? null;
 
