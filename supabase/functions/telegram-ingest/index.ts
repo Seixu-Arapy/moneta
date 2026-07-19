@@ -85,9 +85,111 @@ interface TelegramMessage {
   caption?: string;
   photo?: { file_id: string }[];
   document?: { file_id: string; mime_type?: string; file_name?: string };
+  reply_to_message?: { message_id: number };
+}
+
+interface TelegramCallbackQuery {
+  id: string;
+  data?: string;
+  message?: { message_id: number; chat: { id: number } };
+}
+
+// A reply to one of the worker's questions re-queues the paused row with the
+// answer appended as context. Returns false when the message is not a reply
+// to a pending question (normal ingestion should proceed).
+async function handleQuestionReply(msg: TelegramMessage): Promise<boolean> {
+  if (!msg.reply_to_message || !msg.text) return false;
+
+  const { data: waiting } = await supabase
+    .from("pending_expenses")
+    .select("id, raw_input")
+    .eq("question_message_id", msg.reply_to_message.message_id)
+    .eq("telegram_chat_id", String(msg.chat.id))
+    .eq("status", "waiting_user")
+    .maybeSingle();
+  if (!waiting) return false;
+
+  const rawInput = [waiting.raw_input, `Resposta do usuário à pergunta: ${msg.text}`]
+    .filter(Boolean)
+    .join("\n");
+  const { error } = await supabase
+    .from("pending_expenses")
+    .update({ raw_input: rawInput, status: "pending", question_message_id: null })
+    .eq("id", waiting.id);
+  if (error) throw new Error(`reply update failed: ${error.message}`);
+
+  await tg("sendMessage", {
+    chat_id: msg.chat.id,
+    text: "👍 Obrigado! Vou reprocessar com essa informação.",
+  });
+  return true;
+}
+
+// Buttons from the worker's duplicate question: callback_data is "dup:<id>:<action>"
+async function handleCallback(cq: TelegramCallbackQuery) {
+  const chatId = cq.message?.chat.id;
+  if (!chatId || !ALLOWED_CHAT_IDS.has(String(chatId))) return;
+
+  const [kind, pendingId, action] = (cq.data ?? "").split(":");
+  if (kind !== "dup" || !pendingId) return;
+
+  const { data: row } = await supabase
+    .from("pending_expenses")
+    .select("id, parsed_data")
+    .eq("id", pendingId)
+    .eq("status", "waiting_user")
+    .maybeSingle();
+
+  let answerText = "Ok";
+  let newText: string | null = null;
+
+  if (!row) {
+    answerText = "Essa pendência já foi tratada.";
+  } else if (action === "discard") {
+    await supabase
+      .from("pending_expenses")
+      .update({ status: "discarded", question_message_id: null })
+      .eq("id", row.id);
+    newText = "🗑️ Descartado como duplicata.";
+  } else if (action === "keep") {
+    // the worker stored the full parse; resolve directly without a new AI call
+    const parsed = (row.parsed_data ?? {}) as Record<string, unknown>;
+    const { error } = await supabase.rpc("resolve_pending_expense", {
+      p_pending_id: row.id,
+      p_expense: {
+        merchant: parsed.merchant ?? null,
+        transaction_time: parsed.transaction_time ?? null,
+        amount: parsed.amount,
+        currency: parsed.currency ?? "BRL",
+        notes: parsed.notes ?? null,
+      },
+      p_items: parsed.items ?? [],
+    });
+    if (error) {
+      console.error("resolve after keep failed:", error);
+      answerText = "⚠️ Falha ao registrar — tente de novo.";
+    } else {
+      await supabase
+        .from("pending_expenses")
+        .update({ question_message_id: null })
+        .eq("id", row.id);
+      newText = "💾 Registrado mesmo assim.";
+    }
+  }
+
+  await tg("answerCallbackQuery", { callback_query_id: cq.id, text: answerText });
+  if (newText && cq.message) {
+    await tg("editMessageText", {
+      chat_id: chatId,
+      message_id: cq.message.message_id,
+      text: newText,
+    });
+  }
 }
 
 async function handleMessage(msg: TelegramMessage) {
+  if (await handleQuestionReply(msg)) return;
+
   const rawInput = msg.caption ?? msg.text ?? null;
 
   let fileId: string | null = null;
@@ -126,7 +228,12 @@ async function handleMessage(msg: TelegramMessage) {
 
   const { error: insertError } = await supabase
     .from("pending_expenses")
-    .insert({ raw_input: rawInput, image_url: imagePath, status: "pending" });
+    .insert({
+      raw_input: rawInput,
+      image_url: imagePath,
+      status: "pending",
+      telegram_chat_id: String(msg.chat.id),
+    });
 
   if (insertError) {
     // avoid leaving an orphaned file in the bucket when the insert fails
@@ -157,10 +264,19 @@ Deno.serve(async (req) => {
     return new Response("unauthorized", { status: 401 });
   }
 
-  let update: { message?: TelegramMessage };
+  let update: { message?: TelegramMessage; callback_query?: TelegramCallbackQuery };
   try {
     update = await req.json();
   } catch {
+    return new Response("ok");
+  }
+
+  if (update.callback_query) {
+    try {
+      await handleCallback(update.callback_query);
+    } catch (err) {
+      console.error("callback handling failed:", err);
+    }
     return new Response("ok");
   }
 

@@ -204,8 +204,9 @@ def process_pending(pending: dict) -> None:
 
 | Opção | Como funciona | Quando escolher |
 |---|---|---|
-| **Script local / cron** (recomendada para agora) | Um script Python roda sob demanda ou a cada X minutos, ingere e processa o que estiver pendente | Fase atual: registro manual antecipado, volume baixo, zero infraestrutura |
-| **Edge Function + Database Webhook** | Insert em `pending_expenses` dispara webhook → Edge Function chama a IA e resolve na hora | Quando o app existir e você quiser processamento imediato, tudo dentro do Supabase |
+| **Edge Function agendada (pg_cron)** — **escolhida** | O worker `process-receipts` roda em intervalos fixos, processa um lote pequeno da fila e respeita um orçamento diário (limites do free tier do Gemini) | Zero infraestrutura extra, tudo dentro do Supabase — implementada em `supabase/functions/process-receipts/` |
+| **Script local / cron** | Um script Python roda sob demanda ou a cada X minutos, ingere e processa o que estiver pendente | Alternativa simples se preferir rodar da sua máquina |
+| **Edge Function + Database Webhook** | Insert em `pending_expenses` dispara webhook → Edge Function chama a IA e resolve na hora | Quando quiser processamento imediato em vez de fila com cadência |
 | **Automação (n8n / bot Telegram)** | Você manda a foto num chat, o bot faz a ingestão; o processamento roda como acima | Se quiser registrar recibos pelo celular antes do app ficar pronto |
 
 ---
@@ -248,10 +249,11 @@ flowchart TD
     F --> L
     G --> M
 
-    subgraph PR["🤖 Processamento — cron ou worker"]
-        O["Busca status = 'pending'"] --> P["Signed URL →<br/>baixa a imagem"]
+    subgraph PR["🤖 Processamento — Edge Function agendada (pg_cron)"]
+        O["Busca status = 'pending'<br/>(lote pequeno + orçamento diário)"] --> P["Baixa a imagem<br/>do bucket"]
         P --> Q["Gemini extrai os dados<br/>(saída estruturada)"]
-        Q -->|"parse ok"| R["RPC resolve_pending_expense<br/>(transação atômica)"]
+        Q -->|"tudo certo"| R["RPC resolve_pending_expense<br/>(transação atômica)"]
+        Q -->|"ilegível ou<br/>duplicata suspeita"| T["Pergunta pelo bot<br/>status = 'waiting_user'"]
         Q -->|"falha no parse"| S["status = 'error'<br/>reprocessa ou revisão manual"]
     end
 
@@ -260,6 +262,7 @@ flowchart TD
     R --> N
     R -->|"status = 'done' +<br/>resolved_expense_id"| M
     S --> M
+    T -.->|"você responde ou toca<br/>o botão no Telegram"| M
 ```
 
 Notas de implementação:

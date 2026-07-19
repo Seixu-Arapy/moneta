@@ -10,6 +10,8 @@ No dashboard do Supabase, abra **SQL Editor** e execute os arquivos de `migratio
 2. `20260718000002_create_expenses_and_items.sql`
 3. `20260718000003_create_pending_expenses.sql`
 4. `20260718000004_create_receipts_bucket.sql`
+5. `20260719000001_add_worker_support.sql`
+6. `20260719000002_resolve_pending_expense.sql`
 
 Alternativamente, com a [CLI do Supabase](https://supabase.com/docs/guides/local-development/cli/getting-started) instalada e o projeto linkado (`supabase link`), rode `supabase db push`.
 
@@ -18,8 +20,14 @@ Alternativamente, com a [CLI do Supabase](https://supabase.com/docs/guides/local
 - **`payment_methods`** — cartões/contas usados nas despesas.
 - **`expenses`** — registro definitivo da despesa. `category_id` existe mas ainda **sem FK** (a constraint será adicionada quando a tabela `categories` for criada).
 - **`expense_items`** — itens do recibo, com `on delete cascade` a partir de `expenses`.
-- **`pending_expenses`** — entrada bruta (texto ou imagem) aguardando resolução; `status` inicia como `'pending'`.
+- **`pending_expenses`** — entrada bruta (texto ou imagem) aguardando resolução; `status` inicia como `'pending'` (demais valores: `waiting_user`, `done`, `discarded`, `error`).
 - **Bucket `receipts`** (Storage) — privado, limite de 10 MB por arquivo, aceita jpeg/png/webp/heic e PDF.
+- **`resolve_pending_expense(uuid, jsonb, jsonb)`** — RPC transacional usada pelo pipeline para gravar `expenses` + `expense_items` e fechar a pendência.
+
+## Edge Functions
+
+- **`telegram-ingest`** — bot do Telegram: ingestão de recibos no bucket + `pending_expenses`, e tratamento das respostas às perguntas do worker. Setup em `functions/telegram-ingest/README.md`.
+- **`process-receipts`** — worker agendado (pg_cron) que processa a fila com o Gemini e grava as despesas. Setup em `functions/process-receipts/README.md`.
 
 ## Acesso e RLS
 

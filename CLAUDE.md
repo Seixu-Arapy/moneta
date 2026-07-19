@@ -13,7 +13,8 @@ Personal finance management app. Current phase: pre-app groundwork — Supabase 
 ## Structure
 
 - `supabase/migrations/` — SQL migrations, currently applied manually via the Supabase SQL Editor (see `supabase/README.md`).
-- `supabase/functions/telegram-ingest/` — Edge Function: Telegram bot that ingests receipts into the `receipts` bucket and `pending_expenses`.
+- `supabase/functions/telegram-ingest/` — Edge Function: Telegram bot that ingests receipts into the `receipts` bucket and `pending_expenses`, and handles answers to worker questions (replies and inline-keyboard callbacks).
+- `supabase/functions/process-receipts/` — Edge Function: pg_cron-scheduled worker that processes the queue with Gemini (free tier, throttled) and resolves rows via the `resolve_pending_expense` RPC.
 - `docs/` — architecture and pipeline design docs.
 
 ## Notes

@@ -9,6 +9,8 @@ Edge Function que recebe o webhook do Telegram e faz a ingestão: valida o remet
 | Foto (com ou sem legenda) | Foto compactada → bucket; legenda vira `raw_input` |
 | Documento (imagem ou PDF) | Imagem compactada / PDF direto → bucket |
 | **Só texto** ("almoço 42,50 no cartão Nubank") | Vira `pending_expenses` só com `raw_input`, sem imagem — a IA extrai os dados do texto na etapa de processamento |
+| **Resposta a uma pergunta do worker** | A resposta é anexada ao `raw_input` e a pendência volta para a fila de processamento |
+| **Toque em botão** (pergunta de duplicata) | Descarta a pendência ou registra mesmo assim (usando os dados já extraídos, sem nova chamada de IA) |
 | Outros (áudio, sticker...) | Ignorado |
 
 Mensagens de qualquer chat fora da allowlist são ignoradas silenciosamente. A allowlist aceita **mais de um usuário**: basta listar os `chat_id`s separados por vírgula no secret `TELEGRAM_ALLOWED_CHAT_IDS` (ex.: `111111,222222`). Cada pessoa autorizada conversa com o mesmo bot e os recibos caem todos no mesmo banco.
@@ -54,7 +56,7 @@ supabase functions deploy telegram-ingest --no-verify-jwt
 curl "https://api.telegram.org/bot<TOKEN>/setWebhook" \
   -d "url=https://<project-ref>.supabase.co/functions/v1/telegram-ingest" \
   -d "secret_token=$WEBHOOK_SECRET" \
-  -d "allowed_updates=[\"message\"]"
+  -d "allowed_updates=[\"message\",\"callback_query\"]"
 ```
 
 Deve responder `{"ok":true,...}`. Para conferir: `curl "https://api.telegram.org/bot<TOKEN>/getWebhookInfo"`.
