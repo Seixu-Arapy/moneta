@@ -1,4 +1,4 @@
--- expenses: registro definitivo de despesas
+-- expenses: the definitive expense record
 create table public.expenses (
   id uuid primary key default gen_random_uuid(),
   transaction_time timestamptz not null,
@@ -13,7 +13,7 @@ create table public.expenses (
   installments_total integer,
   is_gift boolean not null default false,
   payment_method_id uuid references public.payment_methods (id),
-  -- FK para categories será adicionada quando a tabela categories existir
+  -- FK to categories will be added once the categories table exists
   category_id uuid,
   created_at timestamptz not null default now()
 );
@@ -24,7 +24,7 @@ create index expenses_category_id_idx on public.expenses (category_id);
 
 alter table public.expenses enable row level security;
 
--- expense_items: itens do recibo de uma despesa
+-- expense_items: line items of an expense's receipt
 create table public.expense_items (
   id uuid primary key default gen_random_uuid(),
   expense_id uuid not null references public.expenses (id) on delete cascade,

@@ -1,4 +1,4 @@
--- pending_expenses: entrada bruta (texto ou imagem) aguardando resolução em expenses
+-- pending_expenses: raw input (text or image) awaiting resolution into expenses
 create table public.pending_expenses (
   id uuid primary key default gen_random_uuid(),
   raw_input text,

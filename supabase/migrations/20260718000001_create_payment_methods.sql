@@ -1,4 +1,4 @@
--- payment_methods: cartões, contas e outros meios de pagamento
+-- payment_methods: cards, accounts, and other payment methods
 create table public.payment_methods (
   id uuid primary key default gen_random_uuid(),
   name text not null,

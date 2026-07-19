@@ -1,24 +1,24 @@
-// Ingestão de recibos via Telegram.
+// Receipt ingestion via Telegram.
 //
-// Fluxo: webhook do Telegram → valida secret token + chat_id → baixa o arquivo →
-// compacta em memória → upload no bucket `receipts` → insert em pending_expenses →
-// só então apaga a mensagem no Telegram e confirma no chat.
+// Flow: Telegram webhook → validate secret token + chat_id → download file →
+// compress in memory → upload to the `receipts` bucket → insert into
+// pending_expenses → only then delete the Telegram message and confirm in chat.
 //
 // Deploy: supabase functions deploy telegram-ingest --no-verify-jwt
-// (--no-verify-jwt é necessário: o Telegram não envia o JWT do Supabase)
+// (--no-verify-jwt is required: Telegram does not send the Supabase JWT)
 
 import { createClient } from "npm:@supabase/supabase-js@2";
 import { Image } from "https://deno.land/x/imagescript@1.3.0/mod.ts";
 
 const BOT_TOKEN = Deno.env.get("TELEGRAM_BOT_TOKEN")!;
 const WEBHOOK_SECRET = Deno.env.get("TELEGRAM_WEBHOOK_SECRET")!;
-// um ou mais chat_ids autorizados, separados por vírgula: "111111,222222"
+// one or more authorized chat_ids, comma-separated: "111111,222222"
 const ALLOWED_CHAT_IDS = new Set(
   Deno.env.get("TELEGRAM_ALLOWED_CHAT_IDS")!.split(",").map((s) => s.trim()),
 );
 
-// SUPABASE_URL e SUPABASE_SERVICE_ROLE_KEY são injetadas automaticamente
-// pelo runtime das Edge Functions.
+// SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are injected automatically
+// by the Edge Functions runtime.
 const supabase = createClient(
   Deno.env.get("SUPABASE_URL")!,
   Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
@@ -40,11 +40,11 @@ async function tg(method: string, payload: Record<string, unknown>) {
 
 async function downloadTelegramFile(fileId: string): Promise<Uint8Array> {
   const info = await tg("getFile", { file_id: fileId });
-  if (!info.ok) throw new Error(`getFile falhou: ${JSON.stringify(info)}`);
+  if (!info.ok) throw new Error(`getFile failed: ${JSON.stringify(info)}`);
   const res = await fetch(
     `https://api.telegram.org/file/bot${BOT_TOKEN}/${info.result.file_path}`,
   );
-  if (!res.ok) throw new Error(`download do arquivo falhou: HTTP ${res.status}`);
+  if (!res.ok) throw new Error(`file download failed: HTTP ${res.status}`);
   return new Uint8Array(await res.arrayBuffer());
 }
 
@@ -54,9 +54,9 @@ interface CompressedFile {
   ext: string;
 }
 
-// Compacta em memória: redimensiona para no máx. 2000px e re-encoda em JPEG q80.
-// PDFs passam direto; formatos que o decoder não conhece (ex.: HEIC) sobem
-// como chegaram — o bucket aceita heic e o processamento com IA lida com eles.
+// Compresses in memory: resizes to at most 2000px and re-encodes as JPEG q80.
+// PDFs pass through untouched; formats the decoder does not support (e.g. HEIC)
+// are uploaded as-is — the bucket accepts heic and the AI stage handles them.
 async function compress(bytes: Uint8Array, mime: string): Promise<CompressedFile> {
   if (mime === "application/pdf") {
     return { bytes, contentType: mime, ext: "pdf" };
@@ -94,7 +94,7 @@ async function handleMessage(msg: TelegramMessage) {
   let mime = "image/jpeg";
 
   if (msg.photo && msg.photo.length > 0) {
-    // msg.photo traz vários tamanhos; o último é o maior
+    // msg.photo lists multiple sizes; the last one is the largest
     fileId = msg.photo[msg.photo.length - 1].file_id;
   } else if (msg.document) {
     const docMime = msg.document.mime_type ?? "";
@@ -108,7 +108,7 @@ async function handleMessage(msg: TelegramMessage) {
     fileId = msg.document.file_id;
     mime = docMime;
   } else if (!rawInput) {
-    return; // nada útil (sticker, áudio etc.)
+    return; // nothing useful (sticker, audio, etc.)
   }
 
   let imagePath: string | null = null;
@@ -121,7 +121,7 @@ async function handleMessage(msg: TelegramMessage) {
     const { error: uploadError } = await supabase.storage
       .from(BUCKET)
       .upload(imagePath, file.bytes, { contentType: file.contentType });
-    if (uploadError) throw new Error(`upload no bucket falhou: ${uploadError.message}`);
+    if (uploadError) throw new Error(`bucket upload failed: ${uploadError.message}`);
   }
 
   const { error: insertError } = await supabase
@@ -129,14 +129,14 @@ async function handleMessage(msg: TelegramMessage) {
     .insert({ raw_input: rawInput, image_url: imagePath, status: "pending" });
 
   if (insertError) {
-    // não deixa arquivo órfão no bucket se o registro falhou
+    // avoid leaving an orphaned file in the bucket when the insert fails
     if (imagePath) {
       await supabase.storage.from(BUCKET).remove([imagePath]);
     }
-    throw new Error(`insert em pending_expenses falhou: ${insertError.message}`);
+    throw new Error(`pending_expenses insert failed: ${insertError.message}`);
   }
 
-  // Salvo e registrado — só agora apaga a mensagem original do Telegram
+  // Saved and registered — only now delete the original Telegram message
   if (fileId) {
     await tg("deleteMessage", {
       chat_id: msg.chat.id,
@@ -165,7 +165,7 @@ Deno.serve(async (req) => {
   }
 
   const msg = update.message;
-  // mensagens de chats fora da allowlist são ignoradas silenciosamente
+  // messages from chats outside the allowlist are silently ignored
   if (!msg || !ALLOWED_CHAT_IDS.has(String(msg.chat?.id))) {
     return new Response("ok");
   }
@@ -173,8 +173,8 @@ Deno.serve(async (req) => {
   try {
     await handleMessage(msg);
   } catch (err) {
-    console.error("ingestão falhou:", err);
-    // mensagem original permanece no chat para não perder o recibo
+    console.error("ingestion failed:", err);
+    // the original message stays in the chat so the receipt is not lost
     await tg("sendMessage", {
       chat_id: msg.chat.id,
       text: `⚠️ Falha ao registrar o recibo — a mensagem foi mantida no chat. Detalhe: ${
@@ -183,6 +183,6 @@ Deno.serve(async (req) => {
     }).catch(() => {});
   }
 
-  // sempre 200 para o Telegram não reenviar o update em loop
+  // always 200 so Telegram does not keep retrying the update
   return new Response("ok");
 });
