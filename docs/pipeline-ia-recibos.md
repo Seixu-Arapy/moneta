@@ -91,12 +91,17 @@ Observação: como o bucket é privado, guarde o **path** do arquivo em `image_u
 
 ### Etapa 2 — Processamento (IA lê a imagem e resolve a pendência)
 
-O processador busca as linhas com `status = 'pending'`, envia a imagem (ou o `raw_input`) para o Claude com **structured outputs** — o que garante um JSON válido no formato das suas tabelas — e grava o resultado.
+O processador busca as linhas com `status = 'pending'`, envia a imagem (ou o `raw_input`) para o **Gemini** com saída estruturada (`response_schema`) — o que garante um JSON válido no formato das suas tabelas — e grava o resultado.
+
+A escolha pelo **free tier do Gemini** (chave criada no [Google AI Studio](https://aistudio.google.com/)) zera o custo do processamento. Dois pontos de atenção:
+
+- **Limites do free tier**: há tetos de requisições por minuto e por dia (na casa de algumas centenas/dia para o `gemini-2.5-flash`; os números mudam — confira em [ai.google.dev/pricing](https://ai.google.dev/gemini-api/docs/pricing)). Para recibos pessoais, sobra folga.
+- **Privacidade**: no free tier, o Google pode usar os dados enviados para melhorar seus produtos (no tier pago, não). Como são recibos de compra, é o mesmo trade-off já aceito no transporte pelo Telegram — mas vale saber que a troca por um tier pago (de qualquer provedor) remove esse uso.
 
 ```python
-import base64
+from google import genai
+from google.genai import types
 from pydantic import BaseModel
-import anthropic
 
 class ExpenseItem(BaseModel):
     description: str
@@ -109,42 +114,30 @@ class ParsedReceipt(BaseModel):
     transaction_time: str | None  # ISO 8601; None se ilegível
     amount: float
     currency: str                 # ex.: "BRL"
-    items: list[ExpenseItem]
+    items: list[ExpenseItem]      # vazio se o recibo não discriminar itens
     needs_detail: bool            # True se algo importante estiver ilegível
     notes: str | None
 
-client = anthropic.Anthropic()  # ANTHROPIC_API_KEY no ambiente
+client = genai.Client()  # GEMINI_API_KEY no ambiente
 
-def parse_receipt_image(image_bytes: bytes, media_type: str) -> ParsedReceipt:
-    response = client.messages.parse(
-        model="claude-opus-4-8",
-        max_tokens=16000,
-        thinking={"type": "adaptive"},
-        messages=[{
-            "role": "user",
-            "content": [
-                {
-                    "type": "image",
-                    "source": {
-                        "type": "base64",
-                        "media_type": media_type,
-                        "data": base64.standard_b64encode(image_bytes).decode(),
-                    },
-                },
-                {
-                    "type": "text",
-                    "text": (
-                        "Extraia os dados deste recibo. Valores em formato numérico, "
-                        "data/hora em ISO 8601 com timezone de São Paulo quando o recibo "
-                        "não indicar outro. Se um campo estiver ilegível, use null e "
-                        "marque needs_detail como true."
-                    ),
-                },
-            ],
-        }],
-        output_format=ParsedReceipt,
+def parse_receipt_image(image_bytes: bytes, mime_type: str) -> ParsedReceipt:
+    response = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=[
+            types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
+            (
+                "Extraia os dados deste recibo. Valores em formato numérico, "
+                "data/hora em ISO 8601 com timezone de São Paulo quando o recibo "
+                "não indicar outro. Liste cada item quando o recibo discriminar; "
+                "se um campo estiver ilegível, use null e marque needs_detail."
+            ),
+        ],
+        config={
+            "response_mime_type": "application/json",
+            "response_schema": ParsedReceipt,
+        },
     )
-    return response.parsed_output
+    return response.parsed
 ```
 
 Com o resultado em mãos, gravar `expenses` + `expense_items` + atualizar a pendência. Para isso ser **atômico** (ou grava tudo, ou nada), o ideal é uma função Postgres chamada via RPC:
@@ -212,7 +205,7 @@ def process_pending(pending: dict) -> None:
 | Opção | Como funciona | Quando escolher |
 |---|---|---|
 | **Script local / cron** (recomendada para agora) | Um script Python roda sob demanda ou a cada X minutos, ingere e processa o que estiver pendente | Fase atual: registro manual antecipado, volume baixo, zero infraestrutura |
-| **Edge Function + Database Webhook** | Insert em `pending_expenses` dispara webhook → Edge Function chama o Claude e resolve na hora | Quando o app existir e você quiser processamento imediato, tudo dentro do Supabase |
+| **Edge Function + Database Webhook** | Insert em `pending_expenses` dispara webhook → Edge Function chama a IA e resolve na hora | Quando o app existir e você quiser processamento imediato, tudo dentro do Supabase |
 | **Automação (n8n / bot Telegram)** | Você manda a foto num chat, o bot faz a ingestão; o processamento roda como acima | Se quiser registrar recibos pelo celular antes do app ficar pronto |
 
 ---
@@ -257,7 +250,7 @@ flowchart TD
 
     subgraph PR["🤖 Processamento — cron ou worker"]
         O["Busca status = 'pending'"] --> P["Signed URL →<br/>baixa a imagem"]
-        P --> Q["Claude extrai os dados<br/>(structured outputs)"]
+        P --> Q["Gemini extrai os dados<br/>(saída estruturada)"]
         Q -->|"parse ok"| R["RPC resolve_pending_expense<br/>(transação atômica)"]
         Q -->|"falha no parse"| S["status = 'error'<br/>reprocessa ou revisão manual"]
     end
@@ -274,4 +267,4 @@ Notas de implementação:
 - **Duplicatas**: antes de resolver, o processador pode consultar `expenses` recentes (mesmo valor ± data próxima) e, em caso de suspeita, preencher `possible_duplicate_of` e deixar `status = 'needs_review'` em vez de resolver automaticamente.
 - **Campos que a IA não resolve sozinha**: `payment_method_id` e `category_id` dependem de cadastro seu. Dá para passar a lista de `payment_methods`/`categories` no prompt e pedir que o modelo escolha o `id` mais provável — ou deixar null e classificar depois.
 - **Reprocessamento**: se o parse falhar, marque `status = 'error'` e guarde o motivo em `parsed_data`; o próximo ciclo pode tentar de novo ou você resolve manualmente.
-- **Chaves**: `SUPABASE_SERVICE_ROLE_KEY` e `ANTHROPIC_API_KEY` ficam só no ambiente do backend/script — nunca no app cliente.
+- **Chaves**: `SUPABASE_SERVICE_ROLE_KEY` e `GEMINI_API_KEY` ficam só no ambiente do backend/script — nunca no app cliente.
