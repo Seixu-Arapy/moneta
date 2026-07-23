@@ -19,7 +19,7 @@ import { encodeBase64 } from "https://deno.land/std@0.224.0/encoding/base64.ts";
 
 const WORKER_SECRET = Deno.env.get("WORKER_SECRET")!;
 const BOT_TOKEN = Deno.env.get("TELEGRAM_BOT_TOKEN")!;
-const GEMINI_MODEL = Deno.env.get("GEMINI_MODEL") ?? "gemini-2.5-flash";
+const GEMINI_MODEL = Deno.env.get("GEMINI_MODEL") ?? "gemini-3.6-flash";
 const BATCH_SIZE = Number(Deno.env.get("WORKER_BATCH_SIZE") ?? "2");
 const DAILY_BUDGET = Number(Deno.env.get("WORKER_DAILY_BUDGET") ?? "200");
 

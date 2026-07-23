@@ -40,6 +40,8 @@ supabase secrets set \
 supabase functions deploy process-receipts --no-verify-jwt
 ```
 
+> **Modelo padrão**: `gemini-3.6-flash` (a geração atual no momento em que este worker foi escrito). O Google aposenta modelos com frequência e chaves novas costumam ficar bloqueadas nas versões antigas — se aparecer o erro "this model is no longer available to new users" (visível na mensagem de ⚠️ do bot), confira o nome atual em [ai.google.dev/gemini-api/docs/models](https://ai.google.dev/gemini-api/docs/models) e ajuste com `supabase secrets set GEMINI_MODEL=<nome atual>` — sem precisar alterar código.
+
 ### 3. Agendar com pg_cron
 
 No SQL Editor (substitua `<project-ref>` e `<WORKER_SECRET>`):

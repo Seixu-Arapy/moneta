@@ -95,7 +95,7 @@ O processador busca as linhas com `status = 'pending'`, envia a imagem (ou o `ra
 
 A escolha pelo **free tier do Gemini** (chave criada no [Google AI Studio](https://aistudio.google.com/)) zera o custo do processamento. Dois pontos de atenção:
 
-- **Limites do free tier**: há tetos de requisições por minuto e por dia (na casa de algumas centenas/dia para o `gemini-2.5-flash`; os números mudam — confira em [ai.google.dev/pricing](https://ai.google.dev/gemini-api/docs/pricing)). Para recibos pessoais, sobra folga.
+- **Limites do free tier**: há tetos de requisições por minuto e por dia (na casa de algumas centenas/dia; os números e o modelo atual mudam com frequência — confira em [ai.google.dev/pricing](https://ai.google.dev/gemini-api/docs/pricing)). Para recibos pessoais, sobra folga. Chaves novas costumam ficar restritas ao modelo mais recente — se `GEMINI_MODEL` apontar para um modelo antigo, a API retorna "no longer available to new users"; troque para a geração atual.
 - **Privacidade**: no free tier, o Google pode usar os dados enviados para melhorar seus produtos (no tier pago, não). Como são recibos de compra, é o mesmo trade-off já aceito no transporte pelo Telegram — mas vale saber que a troca por um tier pago (de qualquer provedor) remove esse uso.
 
 ```python
@@ -122,7 +122,7 @@ client = genai.Client()  # GEMINI_API_KEY no ambiente
 
 def parse_receipt_image(image_bytes: bytes, mime_type: str) -> ParsedReceipt:
     response = client.models.generate_content(
-        model="gemini-2.5-flash",
+        model="gemini-3.6-flash",  # confira a geração atual em ai.google.dev/gemini-api/docs/models
         contents=[
             types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
             (
