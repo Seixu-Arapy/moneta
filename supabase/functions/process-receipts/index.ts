@@ -273,17 +273,18 @@ async function processRow(row: PendingRow): Promise<Outcome> {
 }
 
 async function markError(row: PendingRow, err: unknown) {
+  const detail = String(err).slice(0, 500);
   await supabase
     .from("pending_expenses")
     .update({
       status: "error",
-      parsed_data: { ...(row.parsed_data ?? {}), error: String(err) },
+      parsed_data: { ...(row.parsed_data ?? {}), error: detail },
     })
     .eq("id", row.id);
   if (row.telegram_chat_id) {
     await tg("sendMessage", {
       chat_id: row.telegram_chat_id,
-      text: "⚠️ Não consegui processar um recibo — ele ficou marcado para revisão.",
+      text: `⚠️ Não consegui processar um recibo — ficou marcado para revisão.\n\n${detail}`,
     }).catch(() => {});
   }
 }
