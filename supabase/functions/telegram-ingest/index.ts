@@ -161,18 +161,34 @@ async function triggerWorker(chatId: number) {
   await tg("sendMessage", { chat_id: chatId, text: text });
 }
 
+// Lowercases, strips accents, drops a trailing "@BotUsername" from slash
+// commands (present in group chats), and trims punctuation — so "/Processar",
+// "/processar@MyBot" and "Alguma pendência?" all normalize the same way.
+function normalizeCommand(text: string): string {
+  return text
+    .trim()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/^(\/\w+)@\w+/, "$1")
+    .replace(/[?!.]+$/, "");
+}
+
+const STATUS_COMMANDS = new Set(["/pendencias", "/status", "alguma pendencia", "pendencias"]);
+const PROCESS_COMMANDS = new Set(["/processar", "processar agora"]);
+
 // Chat commands are intercepted before ingestion — otherwise the text would
 // itself become a pending expense. Returns false when the message is not a
 // command.
 async function handleCommand(msg: TelegramMessage): Promise<boolean> {
   if (!msg.text) return false;
-  const text = msg.text.trim().toLowerCase().replace(/[?!.]+$/, "");
+  const text = normalizeCommand(msg.text);
 
-  if (["/pendencias", "/status", "alguma pendência", "alguma pendencia", "pendências", "pendencias"].includes(text)) {
+  if (STATUS_COMMANDS.has(text)) {
     await sendQueueStatus(msg.chat.id);
     return true;
   }
-  if (["/processar", "processar agora"].includes(text)) {
+  if (PROCESS_COMMANDS.has(text)) {
     await triggerWorker(msg.chat.id);
     return true;
   }
