@@ -254,14 +254,16 @@ flowchart TD
         P --> Q["Gemini extrai os dados<br/>(saída estruturada)"]
         Q -->|"tudo certo"| R["RPC resolve_pending_expense<br/>(transação atômica)"]
         Q -->|"ilegível ou<br/>duplicata suspeita"| T["Pergunta pelo bot<br/>status = 'waiting_user'"]
-        Q -->|"falha no parse"| S["status = 'error'<br/>reprocessa ou revisão manual"]
+        Q -->|"falha"| S{"attempts < limite?"}
+        S -->|"sim"| O
+        S -->|"não, esgotou"| U["status = 'error'<br/>revisão manual"]
     end
 
     M --> O
     L --> P
     R --> N
     R -->|"status = 'done' +<br/>resolved_expense_id"| M
-    S --> M
+    U --> M
     T -.->|"você responde ou toca<br/>o botão no Telegram"| M
 ```
 
@@ -269,5 +271,5 @@ Notas de implementação:
 
 - **Duplicatas**: antes de resolver, o processador pode consultar `expenses` recentes (mesmo valor ± data próxima) e, em caso de suspeita, preencher `possible_duplicate_of` e deixar `status = 'needs_review'` em vez de resolver automaticamente.
 - **Campos que a IA não resolve sozinha**: `payment_method_id` e `category_id` dependem de cadastro seu. Dá para passar a lista de `payment_methods`/`categories` no prompt e pedir que o modelo escolha o `id` mais provável — ou deixar null e classificar depois.
-- **Reprocessamento**: se o parse falhar, marque `status = 'error'` e guarde o motivo em `parsed_data`; o próximo ciclo pode tentar de novo ou você resolve manualmente.
+- **Reprocessamento**: uma falha guarda o motivo em `parsed_data` e incrementa `attempts`, mas a linha continua `pending` — o próprio worker tenta de novo nos ciclos seguintes. Só depois de esgotar `WORKER_MAX_ATTEMPTS` tentativas ela vira `status = 'error'` permanente, aí sim exigindo revisão manual.
 - **Chaves**: `SUPABASE_SERVICE_ROLE_KEY` e `GEMINI_API_KEY` ficam só no ambiente do backend/script — nunca no app cliente.
