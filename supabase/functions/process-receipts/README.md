@@ -2,6 +2,18 @@
 
 Edge Function agendada (cron) que consome a fila `pending_expenses`: baixa o recibo do bucket, extrai os dados com o **Gemini** (saída estruturada), checa duplicatas e grava `expenses` + `expense_items` via a RPC `resolve_pending_expense`. Quando fica em dúvida, pergunta pelo bot do Telegram e pausa a pendência como `waiting_user` (o `telegram-ingest` trata a resposta e devolve a linha para a fila).
 
+## Falhas e retry
+
+Uma falha (rede, erro momentâneo do Gemini, etc.) **não** exige ação manual imediata: a linha continua `pending` e o worker tenta de novo automaticamente nos próximos ciclos, até `WORKER_MAX_ATTEMPTS` tentativas (padrão 3, coluna `attempts`). Só depois de esgotar as tentativas a linha vira `status = 'error'` de fato — permanente, exige revisão — e o bot avisa no chat com o motivo. Isso evita tanto a exceção de babá manual para instabilidades passageiras quanto o risco oposto (um recibo genuinamente quebrado tentando para sempre e consumindo o orçamento diário do Gemini).
+
+Recibos de rate limit (HTTP 429) são um caso à parte: não contam como falha nem gastam uma tentativa — a execução inteira para e a fila espera o próximo ciclo, sem alterar a linha.
+
+Para reprocessar manualmente linhas já marcadas como `error` (ex.: depois de trocar `GEMINI_MODEL`):
+
+```sql
+update pending_expenses set status = 'pending', attempts = 0 where status = 'error';
+```
+
 ## Controle de consumo (free tier)
 
 Três camadas, todas configuráveis por secret:
@@ -24,6 +36,7 @@ Além das migrações iniciais, aplique no SQL Editor:
 
 - `20260719000001_add_worker_support.sql` — colunas `telegram_chat_id`, `question_message_id`, `processed_at`
 - `20260719000002_resolve_pending_expense.sql` — a RPC transacional
+- `20260723000001_add_pending_expenses_attempts.sql` — coluna `attempts` (retry limitado)
 
 ### 2. Secrets e deploy
 
@@ -35,7 +48,7 @@ supabase secrets set \
   GEMINI_API_KEY=<chave do AI Studio (projeto SEM billing)> \
   WORKER_SECRET=$WORKER_SECRET
 # TELEGRAM_BOT_TOKEN já está definido pelo telegram-ingest
-# opcionais: GEMINI_MODEL, WORKER_BATCH_SIZE, WORKER_DAILY_BUDGET
+# opcionais: GEMINI_MODEL, WORKER_BATCH_SIZE, WORKER_DAILY_BUDGET, WORKER_MAX_ATTEMPTS
 
 supabase functions deploy process-receipts --no-verify-jwt
 ```

@@ -22,6 +22,7 @@ const BOT_TOKEN = Deno.env.get("TELEGRAM_BOT_TOKEN")!;
 const GEMINI_MODEL = Deno.env.get("GEMINI_MODEL") ?? "gemini-3.6-flash";
 const BATCH_SIZE = Number(Deno.env.get("WORKER_BATCH_SIZE") ?? "2");
 const DAILY_BUDGET = Number(Deno.env.get("WORKER_DAILY_BUDGET") ?? "200");
+const MAX_ATTEMPTS = Number(Deno.env.get("WORKER_MAX_ATTEMPTS") ?? "3");
 
 const supabase = createClient(
   Deno.env.get("SUPABASE_URL")!,
@@ -90,6 +91,7 @@ interface PendingRow {
   image_url: string | null;
   parsed_data: Record<string, unknown> | null;
   telegram_chat_id: string | null;
+  attempts: number;
 }
 
 async function tg(method: string, payload: Record<string, unknown>) {
@@ -272,21 +274,35 @@ async function processRow(row: PendingRow): Promise<Outcome> {
   return "resolved";
 }
 
-async function markError(row: PendingRow, err: unknown) {
+// A transient failure (network blip, temporary Gemini/Supabase error) stays
+// 'pending' and is retried on a later run, up to MAX_ATTEMPTS. Only once
+// retries are exhausted does the row become a permanent 'error' requiring
+// manual review — this is what keeps a single bad receipt from silently
+// burning through the daily Gemini budget forever.
+async function markFailure(row: PendingRow, err: unknown): Promise<"retrying" | "failed"> {
+  const attempts = row.attempts + 1;
   const detail = String(err).slice(0, 500);
+  const exhausted = attempts >= MAX_ATTEMPTS;
+
   await supabase
     .from("pending_expenses")
     .update({
-      status: "error",
+      status: exhausted ? "error" : "pending",
+      attempts,
       parsed_data: { ...(row.parsed_data ?? {}), error: detail },
     })
     .eq("id", row.id);
-  if (row.telegram_chat_id) {
+
+  if (exhausted && row.telegram_chat_id) {
     await tg("sendMessage", {
       chat_id: row.telegram_chat_id,
-      text: `⚠️ Não consegui processar um recibo — ficou marcado para revisão.\n\n${detail}`,
+      text:
+        `⚠️ Não consegui processar um recibo depois de ${attempts} tentativas — ` +
+        `ficou marcado para revisão.\n\n${detail}`,
     }).catch(() => {});
   }
+
+  return exhausted ? "failed" : "retrying";
 }
 
 Deno.serve(async (req) => {
@@ -302,7 +318,7 @@ Deno.serve(async (req) => {
 
   const { data: batch, error } = await supabase
     .from("pending_expenses")
-    .select("id, raw_input, image_url, parsed_data, telegram_chat_id")
+    .select("id, raw_input, image_url, parsed_data, telegram_chat_id, attempts")
     .eq("status", "pending")
     .order("created_at")
     .limit(Math.min(BATCH_SIZE, remainingBudget));
@@ -310,7 +326,7 @@ Deno.serve(async (req) => {
     return Response.json({ error: error.message }, { status: 500 });
   }
 
-  const result = { resolved: 0, asked: 0, errors: 0, rateLimited: false };
+  const result = { resolved: 0, asked: 0, retrying: 0, failed: 0, rateLimited: false };
 
   for (const row of batch ?? []) {
     try {
@@ -324,8 +340,9 @@ Deno.serve(async (req) => {
         break;
       }
       console.error(`processing ${row.id} failed:`, err);
-      await markError(row as PendingRow, err);
-      result.errors++;
+      const outcome = await markFailure(row as PendingRow, err);
+      if (outcome === "retrying") result.retrying++;
+      else result.failed++;
     }
   }
 

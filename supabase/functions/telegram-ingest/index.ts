@@ -151,8 +151,9 @@ async function triggerWorker(chatId: number) {
     const parts = [
       `${body.resolved ?? 0} registrado(s)`,
       `${body.asked ?? 0} pergunta(s) enviada(s)`,
-      `${body.errors ?? 0} erro(s)`,
     ];
+    if (body.retrying) parts.push(`${body.retrying} com falha temporária (retentando)`);
+    if (body.failed) parts.push(`${body.failed} com erro definitivo`);
     text = `✅ Rodada concluída: ${parts.join(", ")}.`;
     if (body.rateLimited) {
       text += "\n⏳ Limite do free tier atingido — o restante fica para o próximo ciclo.";
