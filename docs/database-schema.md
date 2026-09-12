@@ -278,3 +278,159 @@ All tables have RLS enabled with **no policies** (restrictive by default):
 - `pending_expenses.status` IN ('pending', 'waiting_user', 'done', 'discarded', 'error')
 - `user_feedback.feedback_type` IN ('duplicate_corrected', 'category_corrected', ...)
 - `audit_log.action` IN ('insert', 'update', 'delete', 'manual_review', 'reclassify', 'user_resolved', 'error_state')
+
+## Schema Futuro (Planejado)
+
+> Não migrado ainda. Extensões previstas pelo escopo original (parcelas, tags comportamentais,
+> análise semanal) — ver [`docs/planejamento.md`](planejamento.md) e
+> [`docs/automacoes-futuras.md`](automacoes-futuras.md).
+
+- **`behavior_tags`** — tags comportamentais candidatas/aprovadas (ex.: "compra por impulso"), com `trigger_pattern` e `example_items`
+- **`expense_behavior_tags`** — associação N:N entre `expenses`/`expense_items` e `behavior_tags`, com `confidence` e `reasoning` de quem aplicou (IA ou usuário)
+- **`planned_expenses`** — gastos futuros previstos (parcelas, assinaturas), com `expected_at`, `installment_number`/`installments_total` e `resolved_expense_id` quando efetivado
+- **`installments`** — parcelas individuais de uma `expense`, com `due_at` e `paid`
+- **`settings`** — configurações chave/valor (ex.: orçamento por categoria)
+- **`reports`** — relatórios da análise semanal (Kimi), com `notification_decision` (`silent` / `report_ready` / `observation`)
+- **`scheduled_analyses`** — follow-ups agendados pela própria análise anterior (`forward_looking`)
+
+Também previstas em `expenses` (ainda não migradas): `original_amount`/`original_currency` (para
+gastos em moeda estrangeira), `installment_number`/`installments_total`, `is_gift`.
+
+```mermaid
+erDiagram
+    expenses {
+        uuid id PK
+        timestamptz transaction_time
+        text merchant
+        numeric amount
+        text currency
+        numeric original_amount
+        text original_currency
+        text source
+        text notes
+        integer installment_number
+        integer installments_total
+        boolean is_gift
+        uuid payment_method_id FK
+        uuid category_id FK
+        timestamptz created_at
+    }
+    expense_items {
+        uuid id PK
+        uuid expense_id FK
+        text description
+        numeric quantity
+        numeric unit_price
+        numeric total
+    }
+    categories {
+        uuid id PK
+        text name
+        uuid parent_category_id FK
+        text color
+        text icon
+        text created_by
+        text status
+        timestamptz created_at
+    }
+    behavior_tags {
+        uuid id PK
+        text name
+        text trigger_pattern
+        jsonb example_items
+        text created_by
+        text status
+        timestamptz created_at
+    }
+    expense_behavior_tags {
+        uuid id PK
+        uuid behavior_tag_id FK
+        uuid expense_id FK
+        uuid expense_item_id FK
+        float confidence
+        text applied_by
+        text reasoning
+        timestamptz applied_at
+    }
+    payment_methods {
+        uuid id PK
+        text name
+        text type
+        text bank
+        text last_four
+        boolean active
+    }
+    pending_expenses {
+        uuid id PK
+        text raw_input
+        text image_url
+        jsonb parsed_data
+        boolean needs_detail
+        jsonb possible_duplicate_of
+        uuid resolved_expense_id FK
+        text status
+        timestamptz created_at
+    }
+    planned_expenses {
+        uuid id PK
+        text description
+        numeric amount
+        date expected_at
+        text status
+        uuid parent_expense_id FK
+        integer installment_number
+        integer installments_total
+        uuid payment_method_id FK
+        uuid resolved_expense_id FK
+        text notes
+        timestamptz created_at
+    }
+    installments {
+        uuid id PK
+        uuid expense_id FK
+        integer installment_n
+        numeric amount
+        date due_at
+        boolean paid
+    }
+    settings {
+        text key PK
+        jsonb value
+    }
+    reports {
+        uuid id PK
+        date period_start
+        date period_end
+        text report_type
+        text headline
+        jsonb changes
+        jsonb consistencies
+        jsonb taxonomy_notes
+        jsonb forward_looking
+        text full_content
+        notification_decision_type notification_decision
+        text model_notes
+        timestamptz created_at
+    }
+    scheduled_analyses {
+        uuid id PK
+        timestamptz run_at
+        text prompt
+        text status
+        uuid report_id FK
+        timestamptz created_at
+    }
+    categories ||--o{ categories : "parent of"
+    categories ||--o{ expenses : "categorizes"
+    expenses ||--o{ expense_items : "has"
+    behavior_tags ||--o{ expense_behavior_tags : "applied via"
+    expenses ||--o{ expense_behavior_tags : "tagged via"
+    expense_items ||--o{ expense_behavior_tags : "tagged via"
+    payment_methods ||--o{ expenses : "used in"
+    payment_methods ||--o{ planned_expenses : "used in"
+    expenses ||--o{ installments : "generates"
+    expenses ||--o{ planned_expenses : "originates"
+    pending_expenses }o--o| expenses : "resolves to"
+    planned_expenses }o--o| expenses : "resolves to"
+    scheduled_analyses }o--o| reports : "produces"
+```
