@@ -190,18 +190,44 @@ interface PendingExpense {
   telegram_chat_id: string | null;
 }
 
+// merchant/amount/currency have no flat columns on pending_expenses — they
+// only exist inside parsed_data (jsonb) until the row is resolved into
+// `expenses`. Reviewable rows are always 'waiting_user' (Gemini already ran
+// and flagged them); 'pending' rows haven't been parsed yet.
+type PendingExpenseRow = {
+  id: string;
+  image_url: string | null;
+  raw_input: string | null;
+  parsed_data: Record<string, unknown> | null;
+  telegram_chat_id: string | null;
+};
+
+function toPendingExpense(row: PendingExpenseRow): PendingExpense {
+  const parsed = row.parsed_data ?? {};
+  return {
+    id: row.id,
+    merchant: (parsed.merchant as string | null | undefined) ?? null,
+    amount: (parsed.amount as number | undefined) ?? 0,
+    currency: (parsed.currency as string | undefined) ?? "BRL",
+    image_url: row.image_url,
+    raw_input: row.raw_input,
+    parsed_data: row.parsed_data,
+    telegram_chat_id: row.telegram_chat_id,
+  };
+}
+
 async function fetchPendingForReview(chatId: number): Promise<PendingExpense[]> {
   const { data, error } = await supabase
     .from("pending_expenses")
-    .select("id, merchant, amount, currency, image_url, raw_input, parsed_data, telegram_chat_id")
-    .in("status", ["pending", "waiting_user"])
+    .select("id, image_url, raw_input, parsed_data, telegram_chat_id")
+    .eq("status", "waiting_user")
     .eq("telegram_chat_id", String(chatId))
     .order("created_at");
   if (error) {
     console.error("fetch pending failed:", error);
     return [];
   }
-  return (data ?? []) as PendingExpense[];
+  return (data ?? []).map(toPendingExpense);
 }
 
 async function getSuggestedCategories(merchant: string | null, amount: number): Promise<Array<{ id: string; name: string; confidence: number }>> {
@@ -428,12 +454,15 @@ async function handleCallback(cq: TelegramCallbackQuery) {
     // Show category options
     const { data: pending } = await supabase
       .from("pending_expenses")
-      .select("merchant, amount")
+      .select("parsed_data")
       .eq("id", pendingId)
       .maybeSingle();
 
     if (pending) {
-      const suggestions = await getSuggestedCategories(pending.merchant, pending.amount);
+      const parsed = (pending.parsed_data ?? {}) as Record<string, unknown>;
+      const merchant = (parsed.merchant as string | null | undefined) ?? null;
+      const amount = (parsed.amount as number | undefined) ?? 0;
+      const suggestions = await getSuggestedCategories(merchant, amount);
       if (suggestions.length > 0) {
         const keyboard = {
           inline_keyboard: suggestions.map((s) => [
@@ -465,13 +494,14 @@ async function handleCallback(cq: TelegramCallbackQuery) {
     if (!error) {
       const { data: pending } = await supabase
         .from("pending_expenses")
-        .select("id, merchant, amount, currency, image_url, raw_input, parsed_data, telegram_chat_id")
+        .select("id, image_url, raw_input, parsed_data, telegram_chat_id")
         .eq("id", pendingId)
         .maybeSingle();
 
       if (pending) {
-        const suggestions = await getSuggestedCategories(pending.merchant, pending.amount);
-        newText = formatReviewMessage(pending as PendingExpense, suggestions);
+        const expense = toPendingExpense(pending as PendingExpenseRow);
+        const suggestions = await getSuggestedCategories(expense.merchant, expense.amount);
+        newText = formatReviewMessage(expense, suggestions);
         answerText = "✅ Categoria salva";
       }
     } else {
@@ -650,17 +680,10 @@ async function handleMessage(msg: TelegramMessage) {
       : "✅ Despesa registrada (texto).",
   });
 
-  // Auto-start review for the new entry
-  await tg("sendMessage", {
-    chat_id: msg.chat.id,
-    text: "📌 Você tem 1 gasto para revisar",
-  });
-  const newPending = await fetchPendingForReview(msg.chat.id);
-  if (newPending.length > 0) {
-    const latest = newPending[newPending.length - 1];
-    const suggestions = await getSuggestedCategories(latest.merchant, latest.amount);
-    await sendReviewMessage(msg.chat.id, latest, suggestions);
-  }
+  // No review here: the row is still 'pending' — Gemini hasn't parsed it yet
+  // (that happens later, via the cron worker or /processar), so there's no
+  // parsed_data to review. The bot flags it for /revisar once the worker
+  // pauses it as 'waiting_user'.
 }
 
 Deno.serve(async (req) => {
