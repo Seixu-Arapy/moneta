@@ -80,6 +80,7 @@ Essa arquitetura substituiu o plano original (FastAPI no Render + frontend Vite 
 - [`docs/pipeline-ia-recibos.md`](docs/pipeline-ia-recibos.md) — arquitetura da pipeline de IA
 - [`docs/fluxos-interacao.md`](docs/fluxos-interacao.md) — diagramas de sequência do fluxo atual
 - [`docs/automacoes-futuras.md`](docs/automacoes-futuras.md) — análise semanal e automações planejadas
+- [`docs/fluxo-sessao-app-futuro.md`](docs/fluxo-sessao-app-futuro.md) — fluxo de sessão de ponta a ponta (implementado + planejado)
 - [`docs/api-endpoints-futuro.md`](docs/api-endpoints-futuro.md) — endpoints do backend original, ainda não implementados
 - [`docs/planejamento.md`](docs/planejamento.md) — status e prioridades
 - [`supabase/README.md`](supabase/README.md) — setup das migrations
