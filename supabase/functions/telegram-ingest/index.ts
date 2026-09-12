@@ -177,6 +177,120 @@ function normalizeCommand(text: string): string {
 
 const STATUS_COMMANDS = new Set(["/pendencias", "/status", "alguma pendencia", "pendencias"]);
 const PROCESS_COMMANDS = new Set(["/processar", "processar agora"]);
+const REVIEW_COMMANDS = new Set(["/revisar", "revisar"]);
+
+interface PendingExpense {
+  id: string;
+  merchant: string | null;
+  amount: number;
+  currency: string;
+  image_url: string | null;
+  raw_input: string | null;
+  parsed_data: Record<string, unknown> | null;
+  telegram_chat_id: string | null;
+}
+
+async function fetchPendingForReview(chatId: number): Promise<PendingExpense[]> {
+  const { data, error } = await supabase
+    .from("pending_expenses")
+    .select("id, merchant, amount, currency, image_url, raw_input, parsed_data, telegram_chat_id")
+    .in("status", ["pending", "waiting_user"])
+    .eq("telegram_chat_id", String(chatId))
+    .order("created_at");
+  if (error) {
+    console.error("fetch pending failed:", error);
+    return [];
+  }
+  return (data ?? []) as PendingExpense[];
+}
+
+async function getSuggestedCategories(merchant: string | null, amount: number): Promise<Array<{ id: string; name: string; confidence: number }>> {
+  if (!merchant) return [];
+  const { data, error } = await supabase.rpc("suggest_category_for_merchant", {
+    p_merchant: merchant,
+    p_amount: amount,
+    p_limit: 3,
+  });
+  if (error) {
+    console.warn("category suggestion failed:", error);
+    return [];
+  }
+  return (data ?? []).map((row: { category_id: string; category_name: string; confidence: number }) => ({
+    id: row.category_id,
+    name: row.category_name,
+    confidence: row.confidence,
+  }));
+}
+
+function formatReviewMessage(pending: PendingExpense, suggestions: Array<{ id: string; name: string; confidence: number }>): string {
+  const merchant = pending.merchant ?? "Despesa";
+  let msg = `📋 ${merchant} — R$ ${pending.amount.toFixed(2)} ${pending.currency}\n`;
+
+  if (pending.parsed_data?.items && Array.isArray(pending.parsed_data.items)) {
+    const items = pending.parsed_data.items as Array<{ description?: string }>;
+    if (items.length > 0) {
+      msg += `Itens: ${items.map((i) => i.description).join(", ")}\n`;
+    }
+  }
+
+  if (suggestions.length > 0) {
+    msg += "\n💡 Categorias sugeridas:\n";
+    suggestions.forEach((s, i) => {
+      msg += `${i + 1}. ${s.name} (${(s.confidence * 100).toFixed(0)}%)\n`;
+    });
+  }
+
+  return msg;
+}
+
+async function sendReviewMessage(chatId: number, pending: PendingExpense, suggestions: Array<{ id: string; name: string; confidence: number }>) {
+  const msg = formatReviewMessage(pending, suggestions);
+
+  const keyboard = {
+    inline_keyboard: [
+      [
+        { text: "👁️ Ver nota", callback_data: `ver:${pending.id}` },
+        { text: "📝 Classificar", callback_data: `classificar:${pending.id}` },
+      ],
+      [
+        { text: "✏️ Corrigir valor", callback_data: `corrigir:${pending.id}` },
+        { text: "✅ Confirmar", callback_data: `confirmar:${pending.id}` },
+      ],
+      [
+        { text: "⏰ Mais tarde", callback_data: `depois:${pending.id}` },
+        { text: "🗑️ Descartar", callback_data: `descartar:${pending.id}` },
+      ],
+    ],
+  };
+
+  await tg("sendMessage", {
+    chat_id: chatId,
+    text: msg,
+    reply_markup: keyboard,
+  });
+}
+
+async function startReview(chatId: number) {
+  const pending = await fetchPendingForReview(chatId);
+
+  if (pending.length === 0) {
+    await tg("sendMessage", {
+      chat_id: chatId,
+      text: "✨ Sem gastos para revisar — tudo processado.",
+    });
+    return;
+  }
+
+  await tg("sendMessage", {
+    chat_id: chatId,
+    text: `📌 Você tem ${pending.length} gastos para revisar`,
+  });
+
+  // Show the first one
+  const first = pending[0];
+  const suggestions = await getSuggestedCategories(first.merchant, first.amount);
+  await sendReviewMessage(chatId, first, suggestions);
+}
 
 // Chat commands are intercepted before ingestion — otherwise the text would
 // itself become a pending expense. Returns false when the message is not a
@@ -191,6 +305,10 @@ async function handleCommand(msg: TelegramMessage): Promise<boolean> {
   }
   if (PROCESS_COMMANDS.has(text)) {
     await triggerWorker(msg.chat.id);
+    return true;
+  }
+  if (REVIEW_COMMANDS.has(text)) {
+    await startReview(msg.chat.id);
     return true;
   }
   return false;
@@ -227,59 +345,230 @@ async function handleQuestionReply(msg: TelegramMessage): Promise<boolean> {
   return true;
 }
 
-// Buttons from the worker's duplicate question: callback_data is "dup:<id>:<action>"
 async function handleCallback(cq: TelegramCallbackQuery) {
   const chatId = cq.message?.chat.id;
   if (!chatId || !ALLOWED_CHAT_IDS.has(String(chatId))) return;
 
-  const [kind, pendingId, action] = (cq.data ?? "").split(":");
-  if (kind !== "dup" || !pendingId) return;
-
-  const { data: row } = await supabase
-    .from("pending_expenses")
-    .select("id, parsed_data")
-    .eq("id", pendingId)
-    .eq("status", "waiting_user")
-    .maybeSingle();
+  const parts = (cq.data ?? "").split(":", 3);
+  const [kind, pendingId] = parts;
 
   let answerText = "Ok";
   let newText: string | null = null;
 
-  if (!row) {
-    answerText = "Essa pendência já foi tratada.";
-  } else if (action === "discard") {
-    await supabase
+  // Duplicate question from worker: "dup:<id>:<action>"
+  if (kind === "dup") {
+    const action = parts[2];
+    const { data: row } = await supabase
       .from("pending_expenses")
-      .update({ status: "discarded", question_message_id: null })
-      .eq("id", row.id);
-    newText = "🗑️ Descartado como duplicata.";
-  } else if (action === "keep") {
-    // the worker stored the full parse; resolve directly without a new AI call
-    const parsed = (row.parsed_data ?? {}) as Record<string, unknown>;
-    const { error } = await supabase.rpc("resolve_pending_expense", {
-      p_pending_id: row.id,
-      p_expense: {
-        merchant: parsed.merchant ?? null,
-        transaction_time: parsed.transaction_time ?? null,
-        amount: parsed.amount,
-        currency: parsed.currency ?? "BRL",
-        notes: parsed.notes ?? null,
-      },
-      p_items: parsed.items ?? [],
-    });
-    if (error) {
-      console.error("resolve after keep failed:", error);
-      answerText = "⚠️ Falha ao registrar — tente de novo.";
-    } else {
+      .select("id, parsed_data")
+      .eq("id", pendingId)
+      .eq("status", "waiting_user")
+      .maybeSingle();
+
+    if (!row) {
+      answerText = "Essa pendência já foi tratada.";
+    } else if (action === "discard") {
       await supabase
         .from("pending_expenses")
-        .update({ question_message_id: null })
+        .update({ status: "discarded", question_message_id: null })
         .eq("id", row.id);
-      newText = "💾 Registrado mesmo assim.";
+      newText = "🗑️ Descartado como duplicata.";
+    } else if (action === "keep") {
+      const parsed = (row.parsed_data ?? {}) as Record<string, unknown>;
+      const { error } = await supabase.rpc("resolve_pending_expense", {
+        p_pending_id: row.id,
+        p_expense: {
+          merchant: parsed.merchant ?? null,
+          transaction_time: parsed.transaction_time ?? null,
+          amount: parsed.amount,
+          currency: parsed.currency ?? "BRL",
+          category_id: parsed.category_id ?? null,
+          notes: parsed.notes ?? null,
+        },
+        p_items: parsed.items ?? [],
+      });
+      if (error) {
+        console.error("resolve after keep failed:", error);
+        answerText = "⚠️ Falha ao registrar — tente de novo.";
+      } else {
+        await supabase
+          .from("pending_expenses")
+          .update({ question_message_id: null })
+          .eq("id", row.id);
+        newText = "💾 Registrado mesmo assim.";
+      }
+    }
+  }
+  // Review flow callbacks
+  else if (kind === "ver") {
+    // Show the image/text
+    const { data: pending } = await supabase
+      .from("pending_expenses")
+      .select("image_url, raw_input")
+      .eq("id", pendingId)
+      .maybeSingle();
+
+    if (pending?.image_url) {
+      const { data: signed, error: signError } = await supabase.storage
+        .from(BUCKET)
+        .createSignedUrl(pending.image_url, 300);
+      if (!signError && signed) {
+        await tg("sendPhoto", { chat_id: chatId, photo: signed.signedUrl });
+        answerText = "Foto do recibo:";
+      }
+    }
+    if (pending?.raw_input) {
+      await tg("sendMessage", {
+        chat_id: chatId,
+        text: `📄 Nota original:\n\n${pending.raw_input}`,
+      });
+      answerText = "Nota mostrada acima.";
+    }
+  } else if (kind === "classificar") {
+    // Show category options
+    const { data: pending } = await supabase
+      .from("pending_expenses")
+      .select("merchant, amount")
+      .eq("id", pendingId)
+      .maybeSingle();
+
+    if (pending) {
+      const suggestions = await getSuggestedCategories(pending.merchant, pending.amount);
+      if (suggestions.length > 0) {
+        const keyboard = {
+          inline_keyboard: suggestions.map((s) => [
+            { text: `${s.name} (${(s.confidence * 100).toFixed(0)}%)`, callback_data: `cat:${pendingId}:${s.id}` },
+          ]),
+        };
+        await tg("sendMessage", {
+          chat_id: chatId,
+          text: "Escolha a categoria:",
+          reply_markup: keyboard,
+        });
+      } else {
+        answerText = "Sem sugestões disponíveis.";
+      }
+    }
+  } else if (kind === "cat") {
+    // Save category (merged into existing parsed_data) and re-show
+    const categoryId = parts[2];
+    const { data: current } = await supabase
+      .from("pending_expenses")
+      .select("parsed_data")
+      .eq("id", pendingId)
+      .maybeSingle();
+    const { error } = await supabase
+      .from("pending_expenses")
+      .update({ parsed_data: { ...(current?.parsed_data ?? {}), category_id: categoryId } })
+      .eq("id", pendingId);
+
+    if (!error) {
+      const { data: pending } = await supabase
+        .from("pending_expenses")
+        .select("id, merchant, amount, currency, image_url, raw_input, parsed_data, telegram_chat_id")
+        .eq("id", pendingId)
+        .maybeSingle();
+
+      if (pending) {
+        const suggestions = await getSuggestedCategories(pending.merchant, pending.amount);
+        newText = formatReviewMessage(pending as PendingExpense, suggestions);
+        answerText = "✅ Categoria salva";
+      }
+    } else {
+      answerText = "Falha ao salvar categoria";
+    }
+  } else if (kind === "corrigir") {
+    // Ask for the new value; the reply is captured by handleQuestionReply,
+    // which needs question_message_id + status='waiting_user' to match it.
+    const sent = await tg("sendMessage", {
+      chat_id: chatId,
+      text: "Qual é o novo valor? (ex: 150.50)",
+      reply_markup: { force_reply: true },
+    });
+    const sentMessageId = sent?.result?.message_id;
+    if (sentMessageId) {
+      await supabase
+        .from("pending_expenses")
+        .update({ question_message_id: sentMessageId, status: "waiting_user" })
+        .eq("id", pendingId);
+      answerText = "Digite o novo valor e eu salvo";
+    } else {
+      answerText = "Falha ao iniciar correção — tente de novo.";
+    }
+  } else if (kind === "confirmar") {
+    // Resolve the pending expense
+    const { data: pending } = await supabase
+      .from("pending_expenses")
+      .select("id, parsed_data")
+      .eq("id", pendingId)
+      .maybeSingle();
+
+    if (pending) {
+      const parsed = (pending.parsed_data ?? {}) as Record<string, unknown>;
+      const { error } = await supabase.rpc("resolve_pending_expense", {
+        p_pending_id: pendingId,
+        p_expense: {
+          merchant: parsed.merchant ?? null,
+          transaction_time: parsed.transaction_time ?? null,
+          amount: parsed.amount,
+          currency: parsed.currency ?? "BRL",
+          category_id: parsed.category_id ?? null,
+          notes: parsed.notes ?? null,
+        },
+        p_items: parsed.items ?? [],
+      });
+
+      if (!error) {
+        newText = "✅ Confirmado e registrado.";
+        // Show next pending (if any)
+        const allPending = await fetchPendingForReview(chatId);
+        const remaining = allPending.filter((p) => p.id !== pendingId);
+        if (remaining.length > 0) {
+          await tg("sendMessage", {
+            chat_id: chatId,
+            text: `\nPróxima (${remaining.length} restando):`,
+          });
+          const next = remaining[0];
+          const suggestions = await getSuggestedCategories(next.merchant, next.amount);
+          await sendReviewMessage(chatId, next, suggestions);
+        }
+      } else {
+        answerText = "Falha ao confirmar";
+      }
+    }
+  } else if (kind === "depois") {
+    // Just respond and leave
+    newText = "Ok, deixo para depois";
+    answerText = "";
+  } else if (kind === "descartar") {
+    // Mark as discarded
+    const { error } = await supabase
+      .from("pending_expenses")
+      .update({ status: "discarded" })
+      .eq("id", pendingId);
+
+    if (!error) {
+      newText = "🗑️ Descartado.";
+      // Show next pending
+      const allPending = await fetchPendingForReview(chatId);
+      const remaining = allPending.filter((p) => p.id !== pendingId);
+      if (remaining.length > 0) {
+        await tg("sendMessage", {
+          chat_id: chatId,
+          text: `\nPróxima (${remaining.length} restando):`,
+        });
+        const next = remaining[0];
+        const suggestions = await getSuggestedCategories(next.merchant, next.amount);
+        await sendReviewMessage(chatId, next, suggestions);
+      }
+    } else {
+      answerText = "Falha ao descartar";
     }
   }
 
-  await tg("answerCallbackQuery", { callback_query_id: cq.id, text: answerText });
+  if (answerText) {
+    await tg("answerCallbackQuery", { callback_query_id: cq.id, text: answerText });
+  }
   if (newText && cq.message) {
     await tg("editMessageText", {
       chat_id: chatId,
@@ -360,6 +649,18 @@ async function handleMessage(msg: TelegramMessage) {
       ? "✅ Recibo registrado e foto apagada do chat."
       : "✅ Despesa registrada (texto).",
   });
+
+  // Auto-start review for the new entry
+  await tg("sendMessage", {
+    chat_id: msg.chat.id,
+    text: "📌 Você tem 1 gasto para revisar",
+  });
+  const newPending = await fetchPendingForReview(msg.chat.id);
+  if (newPending.length > 0) {
+    const latest = newPending[newPending.length - 1];
+    const suggestions = await getSuggestedCategories(latest.merchant, latest.amount);
+    await sendReviewMessage(msg.chat.id, latest, suggestions);
+  }
 }
 
 Deno.serve(async (req) => {

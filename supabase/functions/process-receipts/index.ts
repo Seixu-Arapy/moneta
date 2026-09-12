@@ -49,6 +49,8 @@ const receiptSchema = {
     transaction_time: { type: Type.STRING, nullable: true },
     amount: { type: Type.NUMBER },
     currency: { type: Type.STRING },
+    category_id: { type: Type.STRING, nullable: true },
+    category_confidence: { type: Type.NUMBER, nullable: true },
     items: {
       type: Type.ARRAY,
       items: {
@@ -80,9 +82,17 @@ interface ParsedReceipt {
   transaction_time: string | null;
   amount: number;
   currency: string;
+  category_id: string | null;
+  category_confidence: number | null;
   items: ParsedItem[];
   needs_detail: boolean;
   notes: string | null;
+}
+
+interface CategorySuggestion {
+  category_id: string;
+  category_name: string;
+  confidence: number;
 }
 
 interface PendingRow {
@@ -140,6 +150,7 @@ async function extract(row: PendingRow): Promise<ParsedReceipt> {
     "Liste cada item quando o recibo discriminar (senão, lista vazia). " +
     "Se um campo importante estiver ilegível ou faltando, use null, marque " +
     "needs_detail como true e explique em notes o que falta.";
+
   if (row.raw_input) {
     prompt += `\n\nContexto enviado pelo usuário:\n${row.raw_input}`;
   }
@@ -154,6 +165,24 @@ async function extract(row: PendingRow): Promise<ParsedReceipt> {
     },
   });
   return JSON.parse(response.text ?? "") as ParsedReceipt;
+}
+
+async function suggestCategories(merchant: string | null, amount: number): Promise<CategorySuggestion[]> {
+  if (!merchant) return [];
+  const { data, error } = await supabase.rpc("suggest_category_for_merchant", {
+    p_merchant: merchant,
+    p_amount: amount,
+    p_limit: 3,
+  });
+  if (error) {
+    console.warn(`category suggestion failed: ${error.message}`);
+    return [];
+  }
+  return (data ?? []).map((row: { category_id: string; category_name: string; confidence: number }) => ({
+    category_id: row.category_id,
+    category_name: row.category_name,
+    confidence: row.confidence,
+  }));
 }
 
 async function findDuplicates(parsed: ParsedReceipt) {
@@ -184,6 +213,7 @@ async function resolveRow(row: PendingRow, parsed: ParsedReceipt) {
       transaction_time: parsed.transaction_time,
       amount: parsed.amount,
       currency: parsed.currency,
+      category_id: parsed.category_id,
       notes: parsed.notes,
     },
     p_items: parsed.items,
@@ -233,6 +263,17 @@ async function processRow(row: PendingRow): Promise<Outcome> {
     .eq("id", row.id);
 
   const parsed = await extract(row);
+
+  // Merchant is only known after the first parse, so category suggestions from
+  // history can't reach the same Gemini call — apply the top match directly
+  // instead of spending a second Gemini call on it.
+  if (parsed.merchant && !parsed.category_id) {
+    const suggestions = await suggestCategories(parsed.merchant, parsed.amount);
+    if (suggestions.length > 0) {
+      parsed.category_id = suggestions[0].category_id;
+      parsed.category_confidence = suggestions[0].confidence;
+    }
+  }
 
   const duplicateConfirmed = row.parsed_data?.duplicate_confirmed === true;
   if (!duplicateConfirmed) {
